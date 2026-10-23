@@ -1,0 +1,71 @@
+name: Code review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: codereview-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      (github.event.pull_request.head.repo.full_name == github.repository ||
+      (github.event.action == 'labeled' && github.event.label.name == 'codereview'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require an immutable external engine revision
+        env:
+          ENGINE_REPOSITORY: ${{ vars.CODE_REVIEW_ENGINE_REPOSITORY }}
+          ENGINE_REF: ${{ vars.CODE_REVIEW_ENGINE_REF }}
+        run: |
+          python - <<'PYCODE'
+          import os, re
+          repo, ref = os.environ["ENGINE_REPOSITORY"], os.environ["ENGINE_REF"]
+          if repo or ref:
+              assert re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "Set engine repository"
+              assert re.fullmatch(r"[0-9a-f]{40}", ref), "Pin external engine to a full commit SHA"
+          PYCODE
+      # Only the trusted base supplies executable engine code and dependencies.
+      # The PR is fetched as data by github-event; no head scripts run on this host.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ vars.CODE_REVIEW_ENGINE_REPOSITORY || github.repository }}
+          ref: ${{ vars.CODE_REVIEW_ENGINE_REF || github.event.pull_request.base.sha }}
+          token: ${{ secrets.CODE_REVIEW_ENGINE_TOKEN || secrets.GITHUB_TOKEN }}
+          path: .review-engine
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.23
+      - run: uv sync --project .review-engine --frozen --no-dev
+      - name: Review the immutable PR revision
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_COORDINATOR_KEY: ${{ secrets.OPENROUTER_COORDINATOR_KEY }}
+          OPENROUTER_WORKER_KEY: ${{ secrets.OPENROUTER_WORKER_KEY }}
+        run: >-
+          uv run --project .review-engine --frozen --no-dev codereview github-event
+          --engine-root .review-engine --repo-root .review-target --output .review-output
+      - name: Preserve findings and trusted manifest
+        if: always() && steps.review.outputs.artifact_name != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.review.outputs.artifact_name }}
+          path: |
+            .review-output/review.json
+            .review-output/manifest.json
+            .review-output/review.md
+          retention-days: 30
+          if-no-files-found: error

@@ -135,10 +135,15 @@ seconds = 1200
 
 
 @app.command()
-def doctor(root: Path = typer.Option(Path("."))) -> None:
-    """Report local setup without sending code or making paid model calls."""
+def doctor(
+    root: Path = typer.Option(Path(".")),
+    online: bool = typer.Option(
+        False, "--online", help="Verify OpenRouter keys and model metadata without model calls"
+    ),
+) -> None:
+    """Check setup; optionally contact OpenRouter without sending source or generating output."""
     settings = load_settings(root.resolve())
-    checks = {
+    checks: dict[str, Any] = {
         "git": bool(shutil.which("git")),
         "docker_cli": bool(shutil.which("docker")),
         "coordinator_model": settings.models.coordinator or "not configured",
@@ -147,9 +152,41 @@ def doctor(root: Path = typer.Option(Path("."))) -> None:
         "coordinator_key_configured": bool(os.environ.get("OPENROUTER_COORDINATOR_KEY")),
         "worker_key_configured": bool(os.environ.get("OPENROUTER_WORKER_KEY")),
         "validation_checks": [check.name for check in settings.checks],
-        "note": "Online runs verify model capabilities/prices and the shared coordinator key's monthly limit before model calls.",
+        "note": "Local presence checks only; key values, connectivity and model IDs are not verified. Use --online for metadata-only verification without model calls.",
     }
+    failed = False
+    if online:
+        from codereview.budgets import BudgetExceeded, DeadlineExceeded
+        from codereview.providers import (
+            OpenRouterClient,
+            ProviderConfigurationError,
+            ProviderError,
+        )
+
+        async def preflight() -> dict[str, Any]:
+            try:
+                async with OpenRouterClient(settings) as client:
+                    return await client.preflight()
+            except (
+                ProviderConfigurationError,
+                ProviderError,
+                BudgetExceeded,
+                DeadlineExceeded,
+            ) as error:
+                return {"status": "failed", "error": f"{type(error).__name__}: {error}"}
+            except (OSError, ValueError) as error:
+                # Client initialization can reject proxy/CA environment settings before
+                # a request exists. Raw exception text can contain private proxy URLs.
+                return {
+                    "status": "failed",
+                    "error": f"HTTP client setup failed ({type(error).__name__}); check proxy and certificate configuration.",
+                }
+
+        checks["online"] = run_async(preflight())
+        failed = checks["online"].get("status") != "ok"
     typer.echo(json.dumps(checks, indent=2))
+    if failed:
+        raise typer.Exit(1)
 
 
 async def perform_review(

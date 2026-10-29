@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
+import ssl
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
@@ -16,6 +18,7 @@ from codereview.config import Settings
 from codereview.models import Usage
 
 BASE_URL = "https://openrouter.ai/api/v1"
+_ENDPOINTS = {"/key", "/models", "/chat/completions", "/generation"}
 
 
 class ProviderConfigurationError(ValueError):
@@ -98,18 +101,43 @@ class OpenRouterClient:
                     follow_redirects=False,
                     **kwargs,
                 )
-        except (TimeoutError, httpx.TimeoutException):
+        except (TimeoutError, httpx.TimeoutException) as error:
+            detail = _transport_diagnostic(method, path, error)
             if self.budget.remaining_seconds() <= 0:
-                raise DeadlineExceeded(
-                    "Review deadline exceeded; outstanding usage remains reserved"
-                ) from None
-            raise ProviderError(
-                "OpenRouter request timed out; outstanding usage remains reserved"
-            ) from None
-        except httpx.HTTPError:
-            raise ProviderError(
-                "OpenRouter transport failed; outstanding usage remains reserved"
-            ) from None
+                raise DeadlineExceeded(f"Review deadline exceeded. {detail}") from None
+            raise ProviderError(detail) from None
+        except httpx.HTTPError as error:
+            raise ProviderError(_transport_diagnostic(method, path, error)) from None
+
+    async def preflight(self) -> dict[str, Any]:
+        """Check credentials and model metadata without source or generation requests.
+
+        Catalog capabilities do not guarantee availability for the selected upstream
+        providers. This check never changes routing or probes a paid completion.
+        """
+        await self._check_key()
+        response = await self._request("GET", "/key", key=self.worker_key)
+        worker = _response_object(response).get("data")
+        if not isinstance(worker, dict):
+            raise ProviderError("OpenRouter returned invalid worker key metadata")
+        if worker.get("is_management_key") is True:
+            raise ProviderConfigurationError(
+                "Worker key must be an inference key, not a management key"
+            )
+        models = {
+            "coordinator": self.settings.models.coordinator,
+            "worker": self.settings.models.worker,
+        }
+        for model in models.values():
+            await self._model(model)
+        return {
+            "status": "ok",
+            "coordinator_key_policy": "passed",
+            "worker_key": "passed",
+            "models": models,
+            "note": "Metadata checks passed; no source was sent and no model calls were made. "
+            "Upstream provider availability and generation are not tested.",
+        }
 
     async def _model(self, model: str) -> dict[str, Any]:
         async with self._catalog_lock:
@@ -124,7 +152,11 @@ class OpenRouterClient:
                 self._catalog = {entry["id"]: entry for entry in entries}
         entry = self._catalog.get(model)
         if entry is None:
-            raise ProviderConfigurationError("Configured model is absent from OpenRouter's catalog")
+            raise ProviderConfigurationError(
+                "Configured model is absent from OpenRouter's catalog. Use its exact catalog ID "
+                "(including the publisher prefix) in coordinator, worker and allowed_models; "
+                "local model aliases are not translated."
+            )
         supported = entry.get("supported_parameters", [])
         if not isinstance(supported, list):
             raise ProviderError("OpenRouter returned invalid model capabilities")
@@ -132,6 +164,14 @@ class OpenRouterClient:
             raise ProviderConfigurationError(
                 "Configured model must support tools and structured outputs"
             )
+        _model_prices(entry)
+        context_length = entry.get("context_length")
+        if (
+            isinstance(context_length, bool)
+            or not isinstance(context_length, int)
+            or context_length <= 0
+        ):
+            raise ProviderError("OpenRouter returned invalid model context length")
         return entry
 
     async def _cost(self, data: dict[str, Any], generation: str | None, key: str) -> Decimal | None:
@@ -176,12 +216,7 @@ class OpenRouterClient:
             else self.settings.models.worker
         )
         entry = await self._model(model)
-        pricing = entry.get("pricing", {})
-        if not isinstance(pricing, dict):
-            raise ProviderError("OpenRouter returned invalid model prices")
-        prompt_price = _money(pricing.get("prompt"))
-        completion_price = _money(pricing.get("completion"))
-        request_price = _money(pricing.get("request", 0))
+        prompt_price, completion_price, request_price = _model_prices(entry)
         max_tokens = min(max_tokens, self.settings.models.max_output_tokens)
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
@@ -309,6 +344,50 @@ class OpenRouterClient:
 
     async def __aexit__(self, *args: Any) -> None:
         await self.aclose()
+
+
+def _transport_diagnostic(method: str, path: str, error: BaseException) -> str:
+    """Describe failures using fixed labels, never exception text or request contents."""
+    # Traverse wrapped causes by type only: their text can contain credentials or URLs.
+    causes: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and all(current is not item for item in causes) and len(causes) < 10:
+        causes.append(current)
+        current = current.__cause__ or current.__context__
+    if any(isinstance(item, ssl.SSLCertVerificationError) for item in causes):
+        hint = "TLS certificate verification failed; check the approved CA bundle/SSL_CERT_FILE."
+    elif any(isinstance(item, socket.gaierror) for item in causes):
+        hint = "DNS resolution failed; check DNS and VPN connectivity."
+    elif isinstance(error, httpx.ProxyError):
+        hint = "Check VPN/proxy settings (HTTPS_PROXY/ALL_PROXY/NO_PROXY)."
+    elif isinstance(error, httpx.ConnectError):
+        hint = "Check DNS, VPN/proxy routing and TLS trust."
+    elif isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        hint = "Request timed out; check VPN/proxy connectivity and service availability."
+    else:
+        hint = "Check VPN/proxy connectivity and service availability."
+    # Use known HTTPX class names only; do not print a custom exception's class label.
+    category = next(
+        (kind.__name__ for kind in type(error).__mro__ if kind.__module__ == "httpx"),
+        "TimeoutError" if isinstance(error, TimeoutError) else "HTTPError",
+    )
+    endpoint = path if path in _ENDPOINTS else "metadata endpoint"
+    verb = method if method in {"GET", "POST"} else "request"
+    detail = f"OpenRouter {verb} {endpoint} failed ({category}). {hint}"
+    if method == "POST" and path == "/chat/completions":
+        detail += " Usage unknown; estimated cost remains reserved."
+    return detail
+
+
+def _model_prices(entry: dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
+    pricing = entry.get("pricing", {})
+    if not isinstance(pricing, dict):
+        raise ProviderError("OpenRouter returned invalid model prices")
+    return (
+        _money(pricing.get("prompt")),
+        _money(pricing.get("completion")),
+        _money(pricing.get("request", 0)),
+    )
 
 
 def _money(value: Any) -> Decimal:

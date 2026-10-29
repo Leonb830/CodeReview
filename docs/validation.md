@@ -1,5 +1,28 @@
 # Implementation validation
 
+## Version 0.2.1
+
+Validated on 2026-10-29 with Python 3.12.
+
+| Check | Result |
+|---|---|
+| `uv run pytest -q` | 162 passed |
+| `uv run ruff check .` | Passed |
+| `uv run ruff format --check src tests` | Passed across 32 files |
+| `uv run mypy` | Passed across 17 source modules |
+| `uv lock --check` | Passed |
+
+New regression cases exercise metadata-only online diagnostics, both keys and
+models, invalid model metadata, proxy/network errors, wrapped DNS and TLS
+failures, secret redaction and preservation of generation cost reservations.
+A full review/report case reproduces a metadata connection failure and verifies
+that it reports the endpoint without claiming a generation was billed.
+
+HTTP responses and connection failures are simulated. The user's Ubuntu/VPN
+connection and live OpenRouter credentials have not been tested here; run
+`codereview doctor --online` on that machine to identify the remaining setup issue.
+No source was sent to a live model and no paid model calls were made.
+
 ## Version 0.2.0
 
 Validated on 2026-10-29 with Python 3.12.

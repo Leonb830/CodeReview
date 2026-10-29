@@ -284,3 +284,37 @@ async def test_snapshot_to_saved_report_through_real_review_and_provider(
         assert "Incomplete coverage" not in report
     assert git(repository, "status", "--porcelain=v1", "--untracked-files=all") == before
     assert (repository / "app.py").read_text() == SOURCE
+
+
+async def test_preflight_transport_failure_report_identifies_network_stage_without_billing_claim(
+    repository: Path,
+):
+    requests: list[httpx.Request] = []
+
+    def disconnected(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ProxyError("private-proxy-password", request=request)
+
+    policy = settings()
+    snapshot = capture_snapshot(repository, settings=policy)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(disconnected)) as http:
+        async with OpenRouterClient(
+            policy,
+            coordinator_key="fixture-coordinator-key",
+            worker_key="fixture-worker-key",
+            http_client=http,
+        ) as client:
+            result = await review(snapshot, policy, client)
+    assert result.status == "failed"
+    assert result.usage.calls == 0
+    assert result.usage.coordinator_reserved == 0
+    assert not result.call_records
+    assert [(request.method, request.url.path) for request in requests] == [("GET", "/api/v1/key")]
+    assert all(not request.content for request in requests)
+    report = render_review(result)
+    assert "GET /key" in report
+    assert "ProxyError" in report
+    assert "VPN/proxy" in report
+    assert "reserved" not in report
+    assert "private-proxy-password" not in report
+    assert "fixture-coordinator-key" not in report

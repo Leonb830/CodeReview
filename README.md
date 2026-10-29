@@ -31,7 +31,36 @@ Provide two distinct credentials through your shell or secret manager:
 - `OPENROUTER_COORDINATOR_KEY`: the **same dedicated key everywhere**, configured in OpenRouter with a monthly limit of $100 or less, monthly reset, and BYOK usage included in the limit.
 - `OPENROUTER_WORKER_KEY`: a separate key for specialist analysis, verification, and repairs. Its provider/account limit is an additional backstop to per-run admission controls.
 
-Do not put credentials in repository configuration. The CLI checks coordinator key settings and catalog pricing before generation. `doctor` checks local setup without making model calls. Relevant private source is sent to OpenRouter and the allowed upstream providers during online runs.
+Do not put credentials in repository configuration. The CLI checks coordinator key settings and catalog pricing before generation. `doctor` checks local presence only: a configured key or model name has not yet been validated. `doctor --online` contacts OpenRouter's metadata endpoints to verify both keys, the coordinator monthly cap, and both models' catalog capabilities and prices. It sends no repository source and makes no model calls. Relevant private source is sent to OpenRouter and the allowed upstream providers during reviews and fixes.
+
+Once credentials are set, verify the online setup:
+
+```sh
+codereview doctor --root /path/to/repository --online
+```
+
+### Connection and configuration troubleshooting
+
+If review planning fails with an OpenRouter transport error, run:
+
+```sh
+codereview --version
+codereview doctor --root /path/to/repository --online
+```
+
+Version 0.2.1 reports the failing endpoint and network-error category. A failure at `GET /key` or `GET /models` occurs during metadata checks, before a model generation is submitted. The excluded-files section describes snapshot coverage; excluding `.env`, lockfiles or images does not cause an OpenRouter connection failure. An empty `validation_checks` list affects requested fix validation, not review connectivity.
+
+- `ConnectError` or `ConnectTimeout`: check that this machine can reach `https://openrouter.ai/api/v1` through its required network, VPN and proxy. Certificate-verification errors can also occur while connecting.
+- `ProxyError`: check your organization's proxy settings. HTTPX uses the standard proxy environment variables, including `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`.
+- Certificate verification failures: use your organization's complete approved CA trust bundle via `SSL_CERT_FILE`, or approved certificate directory via `SSL_CERT_DIR`; keep TLS verification enabled. A bundle containing only one internal certificate may omit public roots needed for other services.
+- HTTP `401`/`403`: check that the credentials are OpenRouter API keys and that the account can access the endpoint. Provider API keys and subscription login credentials are not substitutes.
+- Model absent from the catalog: copy the exact ID from [OpenRouter's model catalog](https://openrouter.ai/models) into `coordinator`, `worker` and `allowed_models`. A model's display name or an alias from another application may not be its OpenRouter ID. The configured upstream provider allowlist is separate from the model ID.
+
+On Ubuntu with a VPN, verify that the terminal running CodeReview has the required proxy and certificate settings for the VPN's routing. A working browser does not establish that Python uses the same proxy or trust store. The endpoint/error category from the online doctor helps distinguish these cases without printing credentials.
+
+The online doctor returns JSON with an `online.status` of `ok` or `failed` and exits nonzero on failure. Passing metadata checks does not guarantee that a selected provider route is currently available for generation. Transport failures after a generation is submitted retain estimated cost reservations because upstream billing may be unknown.
+
+After updating a local CodeReview checkout, refresh a globally installed CLI with `uv tool install --force /absolute/path/to/CodeReview`, then verify `codereview --version`. Inside the checkout, use `uv sync --locked` and `uv run codereview doctor --root /path/to/repository --online`.
 
 ## Local workflow
 

@@ -11,6 +11,7 @@ from typing import Any, Literal, TypeVar
 
 import typer
 
+from codereview import __version__
 from codereview.config import load_settings
 from codereview.models import ReviewResult
 from codereview.reporting import render_fix, render_review
@@ -18,6 +19,21 @@ from codereview.runs import RunStore
 
 app = typer.Typer(no_args_is_help=True, help="Review code and create requested isolated fixes.")
 T = TypeVar("T")
+
+
+def version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False, "--version", callback=version_callback, is_eager=True, help="Show the agent version."
+    ),
+) -> None:
+    """Review Python and TypeScript repositories and create requested isolated fixes."""
 
 
 def run_async(coroutine: Coroutine[Any, Any, T]) -> T:
@@ -98,6 +114,14 @@ seconds = 1200
 # name = "python-tests"
 # image = "your-registry/your-python-test-image@sha256:..."
 # command = ["python", "-m", "pytest", "-q"]
+# timeout_seconds = 120
+#
+# TypeScript projects use the same review/audit commands; no language flag is needed.
+# See docs/typescript.md for a trusted image with project dependencies and this wrapper.
+# [[checks]]
+# name = "typescript-types"
+# image = "your-registry/your-typescript-check-image@sha256:..."
+# command = ["/usr/local/bin/codereview-typecheck"]
 # timeout_seconds = 120
 """
     try:

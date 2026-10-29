@@ -20,6 +20,9 @@ Cover maintainability, defects (correctness/security/regressions), and framework
 In change reviews prioritize changed code and affected modules; unrelated existing debt belongs
 in an audit. Work within max_tasks. Each task should specify what evidence or counterexample
 would establish a useful finding. Do not prescribe numerical line-count violations.
+For TypeScript tasks, include relevant imports, callers, package.json and captured tsconfig files
+when available. Establish compiler options and runtime/module boundaries before proposing
+type-system or framework-specific findings; do not assume every project uses strict mode.
 """
 )
 
@@ -38,7 +41,20 @@ suggestions require evidence of compatible versions and behavior; do not invent 
 APIs or licenses. If evidence is absent, state the candidate as uncertain or omit it.
 For React/Next.js/Prisma, establish the installed version and server/client/runtime or transaction
 context before making framework-specific claims. For Python, preserve exceptions, cleanup, typing,
-async boundaries and behavior. Java-specific analysis is outside this version's scope.
+async boundaries and behavior.
+For TypeScript (.ts, .tsx, .mts, .cts and declaration files), examine nullability and control-flow
+narrowing, discriminated unions and exhaustiveness, generics, structural assignability, unsafe any,
+type assertions/non-null assertions and unvalidated external data. Types are erased at runtime:
+an assertion, interface or generic annotation does not validate JSON, HTTP input or stored data.
+Check promise rejection handling, async callbacks, type-only imports, ESM/CommonJS interoperability
+and public declaration contracts when relevant to the captured code. Preserve type and runtime
+behavior together; do not suggest casts, @ts-ignore or disabling strictness merely to silence errors.
+Base compiler claims on the captured TypeScript version, tsconfig inheritance/options and module
+resolution evidence. Relative import context is a lexical aid, not a compiler-resolved dependency
+graph; unresolved aliases, package types, generated declarations or inherited configs are missing
+context. Do not invent tsc/ESLint diagnostics or claim a type check was run.
+For TSX, distinguish JSX and React component/hook behavior from type-only declarations, with
+framework/version evidence. Java-specific analysis is outside this version's scope.
 Every finding must have exact source evidence, observation, rationale and an assessable alternative.
 If the supplied scope is incomplete, record that in limitations. An empty findings list is valid.
 """
@@ -54,6 +70,9 @@ Smaller improvement suggestions do not need to demonstrate substantial harm, but
 must still be honest and concrete. Reject mere size complaints and invented context.
 Return exactly one decision per supplied finding ID. Do not invent IDs, revise evidence, add
 findings or claim runtime reproduction. Explain support or rejection briefly. Record limitations.
+For TypeScript claims, check the available compiler options, imported types and runtime boundary.
+Reject claims that rely on assumed strictness, unavailable package types or invented compiler
+diagnostics. A type assertion alone is not a runtime validator, and a model review is not tsc.
 """
 )
 

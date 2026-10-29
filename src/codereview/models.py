@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from codereview import __version__
+
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,7 +91,7 @@ class ReviewResult(Record):
     gaps: list[str] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     config_digest: str = ""
-    engine_version: str = "0.1.0"
+    engine_version: str = __version__
     models: dict[str, str] = Field(default_factory=dict)
     github: dict[str, Any] = Field(default_factory=dict)
     call_records: list[dict[str, Any]] = Field(default_factory=list)
@@ -128,7 +130,7 @@ class FixResult(Record):
     usage: Usage = Field(default_factory=Usage)
     call_records: list[dict[str, Any]] = Field(default_factory=list)
     config_digest: str = ""
-    engine_version: str = "0.1.0"
+    engine_version: str = __version__
     models: dict[str, str] = Field(default_factory=dict)
 
 

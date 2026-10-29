@@ -4,6 +4,7 @@ import re
 from pathlib import PurePosixPath
 
 from codereview.models import Snapshot
+from codereview.typescript_context import SOURCE_SUFFIXES, is_project_config, related_context
 
 TRUNCATION_MARKER = "[CONTEXT TRUNCATED]"
 _DEFINITION = re.compile(
@@ -29,6 +30,10 @@ def _source(path: str, text: str, *, related: bool = False) -> str:
 
 
 def _related(snapshot: Snapshot, paths: list[str]) -> list[str]:
+    module_context = related_context(snapshot.files, paths)
+    typescript_scope = any(
+        PurePosixPath(path).suffix in SOURCE_SUFFIXES or is_project_config(path) for path in paths
+    )
     primary = "\n".join(snapshot.files.get(path, "") for path in paths)
     symbols = set(_DEFINITION.findall(primary))
     symbols.update(PurePosixPath(path).stem for path in paths)
@@ -48,12 +53,16 @@ def _related(snapshot: Snapshot, paths: list[str]) -> list[str]:
         filename = PurePosixPath(path).name
         stem = PurePosixPath(path).stem
         manifest = filename in _MANIFESTS
+        if typescript_scope and is_project_config(path):
+            manifest = path in module_context
         callers = len(pattern.findall(text)) if pattern else 0
         referenced = (
             len(stem) > 2 and re.search(r"\b" + re.escape(stem) + r"\b", primary) is not None
         )
-        if manifest or callers or referenced:
-            scored.append((not manifest, -int(referenced), -callers, path))
+        if path in module_context or manifest or callers or referenced:
+            priority = module_context.get(path, 3 if manifest else 4)
+            proximity = -len(PurePosixPath(path).parts) if priority == 0 else 0
+            scored.append((priority, proximity, -int(referenced), -callers, path))
     return [row[-1] for row in sorted(scored)]
 
 

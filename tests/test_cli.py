@@ -2,7 +2,16 @@ import subprocess
 
 from typer.testing import CliRunner
 
+from codereview import __version__
 from codereview.cli import app
+
+
+def test_version_is_available_without_a_repository_or_credentials(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == __version__
+    assert not list(tmp_path.iterdir())
 
 
 def test_init_writes_model_choices_without_credentials(tmp_path):

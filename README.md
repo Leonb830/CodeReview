@@ -1,8 +1,8 @@
 # CodeReview Agent
 
-A Python code review engine and CLI for your repositories or one team. The same engine reviews GitHub pull requests and local changes through OpenRouter. A capable coordinator delegates bounded tasks to smaller workers; an independent worker verifies source evidence before findings appear.
+A code review engine and CLI for Python and TypeScript repositories, implemented in Python. The same engine reviews GitHub pull requests and local changes through OpenRouter. A capable coordinator delegates bounded tasks to smaller workers; an independent worker verifies source evidence before findings appear.
 
-The reviewer prioritizes maintainability: overloaded files, mixed responsibilities, complexity, simpler alternatives, suitable libraries, and comments explaining non-obvious intent. It also checks correctness, security, regressions, and framework behavior. Small improvements remain visible as suggestions. V1 targets Python and TypeScript/React/Next.js/Prisma; Java-specific support is deferred.
+The reviewer prioritizes maintainability: overloaded files, mixed responsibilities, complexity, simpler alternatives, suitable libraries, and comments explaining non-obvious intent. It also checks correctness, security, regressions, and framework behavior. Small improvements remain visible as suggestions. Version 0.2 adds TypeScript-specific guidance and context for imports and project configuration, including TSX, React, Next.js, and Prisma. Java-specific support is deferred. See the [changelog](CHANGELOG.md).
 
 ## Install and configure
 
@@ -11,6 +11,7 @@ Requires Python 3.11+, Git, and [uv](https://docs.astral.sh/uv/). Docker is requ
 ```sh
 uv sync --locked
 uv run codereview --help
+uv run codereview --version
 ```
 
 For use outside this checkout, install the CLI with `uv tool install /absolute/path/to/CodeReview`. Then use `codereview` directly in your target repository.
@@ -50,6 +51,21 @@ codereview fix RUN_ID --all                # explicitly select every finding
 Run `review` or `audit` first and use the reported run and finding IDs. Finding IDs bind to the exact snapshot; changing source or trusted policy requires a fresh review before fixing. `--root` selects the repository. Run records default to the Git common directory's `codereview/` subdirectory, outside the captured source. `--state-dir` overrides it. These records contain private source and diagnostic output; treat them accordingly.
 
 Review exit codes are `0` for complete coverage and `2` for partial/failed coverage; findings themselves do not set a failure code. Offline scope inspection intentionally returns `2`. Fixes return `0` when validated and `2` for drafts or failures. Configuration/usage errors return a nonzero error code.
+
+### Reviewing TypeScript
+
+Use the same commands in a TypeScript Git repository; no language flag or Python application code is required. `.ts`, `.tsx`, `.mts`, `.cts`, and declaration files are captured automatically, along with JavaScript and relevant project configuration. Python runs the reviewer; Node.js is only needed in your own development tools or optional fix-validation image.
+
+```sh
+codereview review --root /path/to/typescript-project --offline
+codereview review --root /path/to/typescript-project --staged
+codereview review --root /path/to/typescript-project --base origin/main
+codereview audit --root /path/to/typescript-project
+```
+
+Initialize model/provider settings and supply the two OpenRouter keys before the online commands. Reviews inspect source and configuration without installing packages or running `tsc`, npm scripts, or application code. See the [TypeScript guide](docs/typescript.md) for context coverage, limitations, and isolated type-check setup.
+
+### Requested fixes
 
 Requested repairs create a separate branch and worktree; the original checkout and index remain untouched. Dirty local changes are captured in a synthetic baseline commit, followed by an **agent-only fix commit**. Inspect the printed worktree and commit before cherry-picking or merging. Never push the synthetic local baseline as a fix. The tool retains worktrees for inspection; remove an unwanted one with `git worktree remove PATH` once you have finished with it.
 
@@ -119,7 +135,7 @@ flowchart LR
 
 Source limits and exclusions are visible in each report. Generated/dependency files, common secret filenames, symlinks, binaries, and configured exclusions are outside normal model review. Filename filtering is **not a comprehensive secret scanner**. Safe dirty lockfiles/binaries are preserved for local fixes without becoming review prompts. Unreproducible local changes block repairs.
 
-Context is bounded. Large scopes that exceed capture/context/task limits produce explicit partial coverage; this first version does not promise exhaustive monorepo analysis. Workers inspect bounded prepared context rather than running unrestricted shell tools. Supported findings are reasoning-backed, not proof of runtime reproduction. Live review quality, model compatibility, and budget targets still require calibration on your repositories.
+Context is bounded. Large scopes that exceed capture/context/task limits produce explicit partial coverage; exhaustive monorepo analysis is not promised. TypeScript import/configuration context is a lexical aid, not a compiler dependency graph or complete module resolver. Workers inspect bounded prepared context rather than running unrestricted shell tools. Supported findings are reasoning-backed, not proof of runtime reproduction. Live review quality, model compatibility, and budget targets still require calibration on your repositories.
 
 The accepted specification is in [docs/design.md](docs/design.md). [Source research](docs/research/orchestration-research.md) explains the OpenExecutive patterns reused: bounded coordination, parallel specialists, independent critique, and traceable failure states. This is a new application, not a fork of its executive-workflow code.
 

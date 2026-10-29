@@ -23,6 +23,14 @@ codereview doctor --root /path/to/typescript-project
 
 Both models must support tools and structured outputs. For online reviews, supply `OPENROUTER_COORDINATOR_KEY` and `OPENROUTER_WORKER_KEY` through your shell or secret manager as described in the [README](../README.md#install-and-configure). Do not put keys in repository files. Online review sends bounded source context to OpenRouter and your allowed upstream providers.
 
+The default doctor checks local presence only. `doctor --online` verifies keys and catalog metadata without sending source or making model calls. If it reports a transport failure, follow the [connection troubleshooting guide](../README.md#connection-and-configuration-troubleshooting). The TypeScript file exclusions and missing optional fix-validation checks do not cause this connection error.
+
+After supplying the keys, verify the online setup:
+
+```sh
+codereview doctor --root /path/to/typescript-project --online
+```
+
 Inspect what will be captured without making model calls:
 
 ```sh

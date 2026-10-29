@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import socket
+import ssl
 
 import httpx
 import pytest
@@ -365,3 +367,215 @@ async def test_retry_with_unknown_usage_keeps_first_attempt_reserved():
     assert client.usage().calls == 2
     assert client.usage().worker_cost == 0.02
     assert client.usage().worker_reserved == client.call_records[0]["estimated_cost"]
+
+
+@pytest.mark.parametrize("endpoint", ["/key", "/models"])
+async def test_preflight_transport_failure_identifies_endpoint_without_claiming_a_charge(endpoint):
+    dispatched = []
+
+    def respond(request):
+        dispatched.append(request.url.path)
+        if request.url.path.endswith(endpoint):
+            raise httpx.ConnectError(
+                "private-proxy-password private-coordinator-key source contents", request=request
+            )
+        return httpx.Response(200, json=key_data())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderError) as error:
+            await client.complete(role="coordinator", messages=[], schema=SCHEMA)
+    message = str(error.value)
+    assert f"GET {endpoint}" in message
+    assert "ConnectError" in message
+    assert "private-" not in message
+    assert "source contents" not in message
+    assert "reserved" not in message.lower()
+    assert not any(path.endswith("/chat/completions") for path in dispatched)
+    assert client.usage().calls == 0
+    assert client.usage().coordinator_reserved == 0
+    assert client.call_records == []
+
+
+async def test_generation_transport_failure_keeps_charge_and_reports_safe_diagnostic():
+    generations = 0
+
+    def respond(request):
+        nonlocal generations
+        if request.url.path.endswith("/key"):
+            return httpx.Response(200, json=key_data())
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=catalog())
+        generations += 1
+        raise httpx.ReadError("sensitive-source-and-key", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderError) as error:
+            await client.complete(role="coordinator", messages=[], schema=SCHEMA)
+    message = str(error.value)
+    assert "POST /chat/completions" in message
+    assert "ReadError" in message
+    assert "sensitive-source-and-key" not in message
+    assert "reserved" in message.lower()
+    assert generations == 1  # A broken connection must not replay an uncertain paid request.
+    assert client.usage().calls == 1
+    assert client.usage().coordinator_reserved > 0
+    assert client.call_records[0]["status"] == "usage_unknown"
+
+
+async def test_proxy_error_preserves_category_without_printing_proxy_credentials():
+    def respond(request):
+        raise httpx.ProxyError("http://proxy-user:proxy-secret@private.proxy:8080", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderError) as error:
+            await client.preflight()
+    message = str(error.value)
+    assert "GET /key" in message
+    assert "ProxyError" in message
+    assert "proxy-secret" not in message
+    assert "private.proxy" not in message
+    assert client.usage().calls == 0
+
+
+@pytest.mark.parametrize(
+    ("cause_type", "expected_hint"),
+    [
+        (ssl.SSLCertVerificationError, "TLS certificate verification failed"),
+        (socket.gaierror, "DNS resolution failed"),
+    ],
+    ids=["wrapped-certificate-verification", "wrapped-dns-resolution"],
+)
+async def test_nested_connection_causes_produce_safe_specific_hints(cause_type, expected_hint):
+    def respond(request):
+        try:
+            raise cause_type(1, "private-root-cause http://user:password@internal.proxy")
+        except OSError as original:
+            try:
+                raise OSError("private-wrapper-detail coordinator-secret") from original
+            except OSError as wrapper:
+                raise httpx.ConnectError("private-top-level-detail", request=request) from wrapper
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderError) as error:
+            await client.preflight()
+    message = str(error.value)
+    assert "GET /key" in message
+    assert "ConnectError" in message
+    assert expected_hint in message
+    for sensitive in ("private-", "password", "internal.proxy", "coordinator-secret"):
+        assert sensitive not in message
+    assert "reserved" not in message.lower()
+    assert client.usage().calls == 0
+
+
+async def test_online_preflight_verifies_both_keys_and_models_without_generation():
+    requests = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path, request.headers["Authorization"]))
+        if request.url.path.endswith("/key"):
+            return httpx.Response(200, json=key_data())
+        assert request.url.path.endswith("/models")
+        return httpx.Response(200, json=catalog())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        result = await client.preflight()
+    assert result["status"] == "ok"
+    assert result["coordinator_key_policy"] == "passed"
+    assert result["worker_key"] == "passed"
+    assert result["models"] == {"coordinator": "test/coordinator", "worker": "test/worker"}
+    assert result["note"]
+    assert all(method == "GET" for method, _, _ in requests)
+    assert {key for _, path, key in requests if path.endswith("/key")} == {
+        "Bearer coord",
+        "Bearer worker",
+    }
+    assert client.usage().calls == 0
+    assert client.usage().worker_reserved == client.usage().coordinator_reserved == 0
+    assert client.call_records == []
+
+
+async def test_online_preflight_rejects_worker_authentication_failure():
+    requests = []
+
+    def respond(request):
+        requests.append(request.method)
+        if request.headers["Authorization"] == "Bearer worker":
+            return httpx.Response(401, text="private-worker-key")
+        if request.url.path.endswith("/key"):
+            return httpx.Response(200, json=key_data())
+        return httpx.Response(200, json=catalog())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderError) as error:
+            await client.preflight()
+    assert "401" in str(error.value)
+    assert "private-worker-key" not in str(error.value)
+    assert set(requests) == {"GET"}
+    assert client.usage().calls == 0
+
+
+@pytest.mark.parametrize("missing_model", ["test/coordinator", "test/worker"])
+async def test_online_preflight_rejects_model_not_in_catalog_with_exact_id_hint(missing_model):
+    def respond(request):
+        assert request.method == "GET"
+        if request.url.path.endswith("/key"):
+            return httpx.Response(200, json=key_data())
+        available = catalog()
+        available["data"] = [item for item in available["data"] if item["id"] != missing_model]
+        return httpx.Response(200, json=available)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises(ProviderConfigurationError) as error:
+            await client.preflight()
+    assert "catalog" in str(error.value).lower()
+    assert "exact" in str(error.value).lower()
+    assert client.usage().calls == 0
+
+
+@pytest.mark.parametrize(
+    "invalid_entry",
+    [
+        {"supported_parameters": ["tools"]},
+        {"pricing": {"prompt": "invalid", "completion": "0.01"}},
+        {"context_length": 0},
+    ],
+    ids=["structured-output-unavailable", "invalid-pricing", "invalid-context-window"],
+)
+async def test_online_preflight_validates_worker_capabilities_and_pricing(invalid_entry):
+    def respond(request):
+        assert request.method == "GET"
+        if request.url.path.endswith("/key"):
+            return httpx.Response(200, json=key_data())
+        available = catalog()
+        available["data"][1].update(invalid_entry)
+        return httpx.Response(200, json=available)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client = OpenRouterClient(
+            configured(), coordinator_key="coord", worker_key="worker", http_client=http
+        )
+        with pytest.raises((ProviderConfigurationError, ProviderError)):
+            await client.preflight()
+    assert client.usage().calls == 0

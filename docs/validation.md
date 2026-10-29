@@ -1,5 +1,32 @@
 # Implementation validation
 
+## Version 0.2.0
+
+Validated on 2026-10-29 with Python 3.12.
+
+| Check | Result |
+|---|---|
+| `uv run pytest -q` | 144 passed |
+| `uv run ruff check .` | Passed |
+| `uv run ruff format --check src tests` | Passed across 32 files |
+| `uv run mypy` | Passed across 17 source modules |
+| `uv lock --check` | Passed |
+| CLI help and `--version` | Passed; reports `0.2.0` |
+
+New cases exercise TypeScript, TSX, module and declaration files across working,
+staged, branch and audit scopes; relative imports and direct importers; local
+JSONC configuration inheritance and references; exact TypeScript evidence,
+rejected fabricated evidence, stored reports and offline CLI inspection.
+The existing Python suite remains passing.
+
+TypeScript model responses are scripted in tests. No paid model calls, target
+TypeScript compiler run, or Node validation-image build was performed for this
+version. The optional image in the TypeScript guide is an example to adapt and
+validate for the target project. Source relationship discovery remains lexical
+and bounded, not a compiler-resolved module graph.
+
+## Version 0.1.0
+
 Validated on 2026-10-23 with Python 3.12.
 
 | Check | Result |
